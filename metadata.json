@@ -1,0 +1,5 @@
+{
+  "name": "Buscador Inteligente de LeyChile",
+  "description": "Una aplicación web para buscar normas y leyes en la base de datos de LeyChile utilizando procesamiento de lenguaje natural asistido por IA para transformar las consultas en búsquedas estructuradas y mostrar resultados resumidos.",
+  "requestFramePermissions": []
+}
