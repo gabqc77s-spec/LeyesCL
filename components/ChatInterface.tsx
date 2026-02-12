@@ -7,19 +7,17 @@ import { ModelResponse } from './ModelResponse.tsx';
 interface ChatInterfaceProps {
   messages: ChatMessage[];
   onSendMessage: (message: string) => void;
+  onConfirm: () => void;
   isLoading: boolean;
   error: string | null;
 }
 
-export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, isLoading, error }) => {
+export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, onConfirm, isLoading, error }) => {
   const [currentInput, setCurrentInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isAtBottom = useRef(true);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   
-  const lastMessage = messages[messages.length - 1];
-  const isAwaitingConfirmation = lastMessage?.role === 'model' && lastMessage.isAwaitingConfirmation;
-
   useEffect(() => {
     if (isAtBottom.current && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -27,7 +25,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMe
   }, [messages]);
 
   const handleScroll = () => {
-    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current!;
+    if (!chatContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
     if (scrollHeight - scrollTop <= clientHeight + 5) {
       isAtBottom.current = true;
     } else {
@@ -49,6 +48,9 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMe
       handleSend();
     }
   };
+  
+  const lastMessage = messages[messages.length - 1];
+  const isAwaitingUserConfirmation = lastMessage?.role === 'model' && lastMessage.isAwaitingConfirmation;
 
   return (
     <div className="bg-white rounded-xl shadow-lg flex flex-col flex-1 h-full">
@@ -67,18 +69,19 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMe
                 ) : (
                   <p className="whitespace-pre-wrap">{msg.content}</p>
                 )}
+                
+                {msg.isAwaitingConfirmation && !isLoading && (
+                  <div className="mt-4 pt-3 border-t border-gray-200 flex gap-2">
+                    <button onClick={onConfirm} className="px-4 py-1.5 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700">
+                      Sí, procede
+                    </button>
+                    <button onClick={() => setCurrentInput('No, quiero modificar el plan...')} className="px-4 py-1.5 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300">
+                      No, quiero modificar
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-            {msg.isAwaitingConfirmation && index === messages.length - 1 && !isLoading && (
-                 <div className="flex justify-start pl-11 pt-2 gap-2">
-                    <button onClick={() => handleSend("Sí, procede")} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
-                        Sí, procede
-                    </button>
-                    <button onClick={() => handleSend("No, quiero modificar")} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors">
-                        No, quiero modificar
-                    </button>
-                 </div>
-            )}
           </div>
         ))}
         {isLoading && (
@@ -102,7 +105,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMe
             value={currentInput}
             onChange={(e) => setCurrentInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={isAwaitingConfirmation ? "Confirma el plan o escribe tu modificación..." : "Escribe tu consulta legal aquí..."}
+            placeholder={isAwaitingUserConfirmation ? "Responde a la propuesta o escribe para modificar..." : "Escribe tu consulta legal aquí..."}
             className="w-full pl-4 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition resize-none"
             rows={1}
             disabled={isLoading}

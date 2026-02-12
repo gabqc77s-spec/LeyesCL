@@ -1,13 +1,14 @@
 
 import React, { useState, useCallback, useRef } from 'react';
+// FIX: Import `extractRelevantSnippets` to resolve the 'Cannot find name' error.
 import { analyzeAndPlanNextStep, extractRelevantSnippets } from './services/geminiService.ts';
 import { fetchLawCandidates, fetchFullLawText } from './services/leyChileService.ts';
-import type { ResultItem, ChatMessage, AiPlanningResponse } from './types.ts';
+import type { ResultItem, ChatMessage, AiPlanningResponse, AiReference, ProposePlan, SearchMorePlan } from './types.ts';
 import { ChatInterface } from './components/ChatInterface.tsx';
+import { logger } from './services/loggerService.ts';
+import { LogViewer } from './components/LogViewer.tsx';
 
-type DossierItem = ResultItem & { fullText: string; snippets: string[] };
-
-const MAX_SEARCH_LOOPS = 2; // Prevenir bucles infinitos
+type DossierItem = ResultItem & { snippets: string[] };
 
 const App: React.FC = () => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -17,99 +18,102 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const dossierRef = useRef<Map<string, DossierItem>>(new Map());
   const clarificationAttemptRef = useRef(0);
-  const proposedPlanRef = useRef<string[] | null>(null);
+  const proposedPlanRef = useRef<ProposePlan | SearchMorePlan | null>(null);
 
-  const executeSearchLoop = async (initialSearchQueries: string[], currentMessages: ChatMessage[]) => {
-    let searchQueries = initialSearchQueries;
-    let loops = 0;
+  const executeSearch = async (searchQuery: string) => {
+      logger.info('Iniciando ejecución de búsqueda.', { query: searchQuery });
+      setIsLoading(true);
 
-    while (loops < MAX_SEARCH_LOOPS) {
-        const uniqueCandidates = new Map<string, ResultItem>();
-        for (const sq of searchQueries) {
-          // FIX: Asegura que la cadena de búsqueda use '+' en lugar de espacios.
-          const formattedQuery = sq.trim().replace(/\s+/g, '+');
-          console.log(`[DEBUG] Formatted search query: "${formattedQuery}"`);
-          const candidates = await fetchLawCandidates(formattedQuery);
-          candidates.forEach(newItem => {
-            if (newItem.id !== 'Desconocido' && !dossierRef.current.has(newItem.id)) {
-              // Se guarda la consulta original (sq) para mantener el contexto para la IA.
-              uniqueCandidates.set(newItem.id, { ...newItem, sourceQueries: [sq] });
-            }
-          });
-        }
-        
-        const newLawsToProcess = Array.from(uniqueCandidates.values());
-        for (const law of newLawsToProcess) {
-          const fullText = await fetchFullLawText(law.id);
-          if (fullText) {
-            const snippets = await extractRelevantSnippets(currentMessages[currentMessages.length - 1]!.content, { id: law.id, fullText });
-            dossierRef.current.set(law.id, { ...law, fullText, snippets });
-          }
-        }
-        
-        const plan = await analyzeAndPlanNextStep(currentMessages, Array.from(dossierRef.current.values()), 0); // Clarification attempts irrelevant here
+      const formattedQuery = searchQuery.trim().replace(/\s+/g, '+');
+      logger.search(`Ejecutando búsqueda en LeyChile: "${searchQuery}"`);
 
-        if (plan.plan === 'RESPOND') {
-          setChatMessages(prev => [...prev, { role: 'model', content: plan.answer, references: plan.references }]);
+      setChatMessages(prev => [
+          ...prev, 
+          { role: 'model', content: `Buscando "${searchQuery}"...`, isLoading: true }
+      ]);
+      
+      const candidates = await fetchLawCandidates(formattedQuery);
+      logger.info(`Búsqueda para "${searchQuery}" encontró ${candidates.length} candidatos.`);
+
+      if (candidates.length === 0) {
+          setChatMessages(prev => [
+              ...prev,
+              { role: 'model', content: `No encontré resultados para "${searchQuery}". Intentaré reformular la estrategia.` }
+          ]);
+          const nextPlan = await analyzeAndPlanNextStep(chatMessages, Array.from(dossierRef.current.values()), clarificationAttemptRef.current);
+          handleAiPlan(nextPlan);
           return;
-        }
+      }
+      
+      const newLaws = candidates.filter(c => c.id !== 'Desconocido' && !dossierRef.current.has(c.id));
 
-        if (plan.plan === 'SEARCH_MORE') {
-          setChatMessages(prev => [...prev, { role: 'model', content: `Investigación inicial completada. Profundizando sobre: "${plan.reasoning}"...`, isLoading: true }]);
-          searchQueries = plan.newSearchQueries;
-          loops++;
-        } else {
-            // If the model wants to clarify or propose again, we assume we have enough and try to respond.
-            const finalPlan = await analyzeAndPlanNextStep(currentMessages, Array.from(dossierRef.current.values()), 99); // Force RESPOND or best guess
-            if(finalPlan.plan === 'RESPOND') {
-                 setChatMessages(prev => [...prev, { role: 'model', content: finalPlan.answer, references: finalPlan.references }]);
-            } else {
-                 throw new Error("No pude formular una respuesta con la información encontrada.");
-            }
-            return;
-        }
+      if (newLaws.length > 0) {
+          setChatMessages(prev => [
+              ...prev,
+              { role: 'model', content: `Encontré ${newLaws.length} normativas nuevas. Analizando...`, isLoading: true }
+          ]);
+
+          for (const law of newLaws) {
+              logger.info(`Analizando ley: "${law.title}" (ID: ${law.id})`);
+              const fullText = await fetchFullLawText(law.id);
+              const snippets = fullText ? await extractRelevantSnippets(chatMessages[0].content, { id: law.id, fullText }) : [];
+              dossierRef.current.set(law.id, { ...law, sourceQueries: [searchQuery], snippets });
+              logger.info(`Ley "${law.title}" añadida al dossier.`);
+          }
+      }
+
+      logger.info('Análisis completado. Solicitando siguiente plan a la IA.');
+      const finalPlan = await analyzeAndPlanNextStep(chatMessages, Array.from(dossierRef.current.values()), clarificationAttemptRef.current);
+      handleAiPlan(finalPlan);
+  };
+
+  const handleUserConfirmation = async () => {
+    if (proposedPlanRef.current) {
+      const planToExecute = proposedPlanRef.current;
+      proposedPlanRef.current = null;
+      
+      // Elimina el mensaje de confirmación
+      setChatMessages(prev => prev.filter(m => !m.isAwaitingConfirmation));
+
+      await executeSearch(planToExecute.searchQuery);
     }
-     throw new Error("No pude encontrar una respuesta satisfactoria después de múltiples búsquedas.");
   };
 
   const handleSendMessage = useCallback(async (newMessage: string) => {
+    logger.info('Nuevo mensaje de usuario recibido.', { message: newMessage });
     setError(null);
     const lastMessage = chatMessages[chatMessages.length - 1];
-    const newMessages: ChatMessage[] = [...chatMessages, { role: 'user', content: newMessage }];
+    
+    // Si el usuario confirma con "sí" o un mensaje similar
+    if (lastMessage?.isAwaitingConfirmation && (newMessage.toLowerCase().startsWith('sí') || newMessage.toLowerCase().startsWith('si'))) {
+        handleUserConfirmation();
+        return;
+    }
+
+    const newMessages: ChatMessage[] = [...chatMessages.filter(m => !m.isAwaitingConfirmation), { role: 'user', content: newMessage }];
     setChatMessages(newMessages);
     setIsLoading(true);
+    proposedPlanRef.current = null; // Cancela cualquier plan anterior
 
     try {
-        // STATE: Awaiting user confirmation for a proposed plan
-        if (lastMessage?.isAwaitingConfirmation) {
-            // FIX: Stricter confirmation check. Must START with a confirmation word.
-            const isConfirmed = /^(s[ií]|procede|correcto|acepto|dale|ok)/i.test(newMessage.trim());
-            if (isConfirmed && proposedPlanRef.current) {
-                setChatMessages(prev => [...prev, { role: 'model', content: "¡Entendido! Iniciando investigación...", isLoading: true }]);
-                await executeSearchLoop(proposedPlanRef.current, newMessages);
-            } else {
-                // User provided feedback, let the AI generate a new proposal
-                const plan = await analyzeAndPlanNextStep(newMessages, Array.from(dossierRef.current.values()), clarificationAttemptRef.current);
-                handleAiPlan(plan, newMessages);
-            }
-            return;
-        }
-
         const isClarificationResponse = lastMessage?.isClarificationRequest === true;
 
         if (isClarificationResponse) {
+            logger.info('El mensaje del usuario es una respuesta a una clarificación.');
             clarificationAttemptRef.current++;
         } else {
+            logger.info('Nueva consulta iniciada. Limpiando dossier y contadores.');
             dossierRef.current.clear();
             clarificationAttemptRef.current = 0;
-            proposedPlanRef.current = null;
         }
         
+        logger.info('Solicitando plan a la IA.');
         const plan = await analyzeAndPlanNextStep(newMessages, Array.from(dossierRef.current.values()), clarificationAttemptRef.current);
-        handleAiPlan(plan, newMessages);
+        handleAiPlan(plan);
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Ocurrió un error desconocido.';
+      logger.error('Error en el manejador de mensajes.', { error: errorMessage });
       setError(errorMessage);
       setChatMessages(prev => [...prev, { role: 'model', content: `Lo siento, ocurrió un error: ${errorMessage}` }]);
     } finally {
@@ -117,27 +121,23 @@ const App: React.FC = () => {
     }
   }, [chatMessages]);
   
-  const handleAiPlan = (plan: AiPlanningResponse, currentMessages: ChatMessage[]) => {
+  const handleAiPlan = (plan: AiPlanningResponse) => {
+      logger.aiPlan('Plan recibido de la IA.', { plan });
+      setIsLoading(false);
+
       switch (plan.plan) {
           case 'CLARIFY':
               setChatMessages(prev => [...prev, { role: 'model', content: plan.clarificationQuestion, isClarificationRequest: true }]);
               break;
           case 'PROPOSE_PLAN':
-              proposedPlanRef.current = plan.newSearchQueries;
-              setChatMessages(prev => [...prev, { role: 'model', content: plan.proposal, isAwaitingConfirmation: true }]);
-              break;
           case 'SEARCH_MORE':
-              // CRITICAL FIX: Do not execute search directly. Convert it into a new proposal for user confirmation.
-              // This prevents the AI from searching without permission after feedback is given.
-              proposedPlanRef.current = plan.newSearchQueries;
-              setChatMessages(prev => [...prev, { 
-                  role: 'model', 
-                  content: `Entendido. Basado en tu respuesta, he ajustado el plan. Propongo investigar lo siguiente:\n\n*   ${plan.reasoning}\n\n¿Procedemos con esta nueva búsqueda?`, 
-                  isAwaitingConfirmation: true 
-              }]);
+              proposedPlanRef.current = plan;
+              const message = `${plan.reasoning}\n\nPropongo buscar: **"${plan.searchQuery}"**. ¿Procedo?`;
+              setChatMessages(prev => [...prev, { role: 'model', content: message, isAwaitingConfirmation: true }]);
               break;
           case 'RESPOND':
-               setChatMessages(prev => [...prev, { role: 'model', content: plan.answer, references: plan.references }]);
+               const finalAnswer = plan.answer.length > 0 ? plan.answer : "He completado la búsqueda. Si necesitas algo más, no dudes en preguntar.";
+               setChatMessages(prev => [...prev, { role: 'model', content: finalAnswer, references: plan.references }]);
                break;
       }
   }
@@ -157,11 +157,14 @@ const App: React.FC = () => {
           <ChatInterface 
             messages={chatMessages} 
             onSendMessage={handleSendMessage} 
+            onConfirm={handleUserConfirmation}
             isLoading={isLoading}
             error={error}
           />
       </main>
       
+      <LogViewer />
+
       <footer className="text-center py-4 text-sm text-gray-500">
         <p>Powered by Gemini API y la base de datos de LeyChile.</p>
         <p>Esta es una herramienta de demostración y no reemplaza la asesoría legal profesional.</p>

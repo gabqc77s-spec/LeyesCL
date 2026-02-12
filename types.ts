@@ -24,8 +24,8 @@ export interface ChatMessage {
   content: string;
   references?: AiReference[];
   isLoading?: boolean;
-  isClarificationRequest?: boolean;
   isAwaitingConfirmation?: boolean;
+  isClarificationRequest?: boolean;
 }
 
 export interface ResultItem extends FetchedItem {
@@ -33,7 +33,7 @@ export interface ResultItem extends FetchedItem {
 }
 
 // Tipos para la planificación del modelo PRO
-export type PlanType = 'RESPOND' | 'CLARIFY' | 'SEARCH_MORE' | 'PROPOSE_PLAN';
+export type PlanType = 'RESPOND' | 'CLARIFY' | 'PROPOSE_PLAN' | 'SEARCH_MORE';
 
 export interface RespondPlan {
   plan: 'RESPOND';
@@ -46,16 +46,17 @@ export interface ClarifyPlan {
   clarificationQuestion: string;
 }
 
-export interface SearchMorePlan {
-  plan: 'SEARCH_MORE';
-  newSearchQueries: string[];
+export interface ProposePlan {
+  plan: 'PROPOSE_PLAN';
+  searchQuery: string;
   reasoning: string;
 }
 
-export interface ProposePlan {
-    plan: 'PROPOSE_PLAN';
-    proposal: string;
-    newSearchQueries: string[];
+export interface SearchMorePlan {
+  plan: 'SEARCH_MORE';
+  searchQuery: string;
+  reasoning: string;
 }
 
-export type AiPlanningResponse = RespondPlan | ClarifyPlan | SearchMorePlan | ProposePlan;
+
+export type AiPlanningResponse = RespondPlan | ClarifyPlan | ProposePlan | SearchMorePlan;
